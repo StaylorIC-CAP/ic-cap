@@ -127,9 +127,18 @@ async function apiPut(sheetId, range, values) {
 }
 async function apiClear(sheetId, range) {
   var token=getToken();
+  if (!token) throw new Error("Not signed in to Google");
   var url="https://sheets.googleapis.com/v4/spreadsheets/"+sheetId+"/values/"+encodeURIComponent(range)+":clear";
   var r=await fetch(url,{method:"POST",headers:{Authorization:"Bearer "+token}});
-  if (!r.ok) throw new Error("Clear failed: "+r.status);
+  if (r.status===401) {
+    localStorage.removeItem("icap_gtoken");
+    localStorage.removeItem("icap_gtoken_exp");
+    throw new Error("Google session expired. The sign-in window may have been blocked. Please allow popups for this site, then try again.");
+  }
+  if (!r.ok) {
+    var body=""; try { body=await r.text(); } catch(e) {}
+    throw new Error("Clear failed: "+r.status+" "+body.slice(0,100));
+  }
 }
 async function ensureTabs(sheetId) {
   var token=getToken();
@@ -511,8 +520,8 @@ function App() {
 
   var flash=function(msg,ms) { setSyncMsg(msg); if(ms) setTimeout(function(){setSyncMsg("");},ms); };
 
-  var ensureAuth=async function() {
-    if (tokenValid()) return true;
+  var ensureAuth=async function(forceNew) {
+    if (!forceNew && tokenValid()) return true;
     var c=cfg();
     if (!c.clientId) return false;
     try { await launchOAuth(c.clientId); return true; }
@@ -621,7 +630,7 @@ function App() {
       localStorage.removeItem("icap_gtoken");
       localStorage.removeItem("icap_gtoken_exp");
       flash("Signing in to Google...",0);
-      var ok=await ensureAuth();
+      var ok=await ensureAuth(true);
       if (!ok) throw new Error("Google sign-in failed or was cancelled");
       flash("Ensuring sheet tabs exist...",0);
       await ensureTabs(c.sheetId);
