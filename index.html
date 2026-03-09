@@ -43,8 +43,8 @@ const EMPTY = SEED_DATA;
 
 const P_COLOR = {High:"#ef4444",Medium:"#f59e0b",Low:"#22c55e"};
 const S_COLOR = {"Not Started":"#64748b","In Progress":"#3b82f6","Complete":"#22c55e","Blocked":"#ef4444"};
-const TABS = ["tasks","calendar","members","bd","leave","taxes","travel","conferences","ai"];
-const LABELS = {tasks:"Tasks",calendar:"Calendar",members:"Members",bd:"BD Opps",leave:"Leave",taxes:"Taxes",travel:"Travel",conferences:"Conf.",ai:"AI"};
+const TABS = ["summary","tasks","calendar","members","bd","leave","taxes","travel","conferences","ai"];
+const LABELS = {summary:"Summary",tasks:"Tasks",calendar:"Calendar",members:"Members",bd:"BD Opps",leave:"Leave",taxes:"Taxes",travel:"Travel",conferences:"Conf.",ai:"AI"};
 
 function cfg() { return {clientId:localStorage.getItem(CLIENT_ID_KEY), sheetId:localStorage.getItem(SHEET_ID_KEY)}; }
 function getToken() { return localStorage.getItem(GTOKEN_KEY); }
@@ -499,7 +499,7 @@ function SyncPanel(props) {
 
 function App() {
   const [data,setData]=useState(null);
-  const [tab,setTab]=useState("tasks");
+  const [tab,setTab]=useState("summary");
   const [loading,setLoading]=useState(true);
   const [loadMsg,setLoadMsg]=useState("Loading...");
   const [syncing,setSyncing]=useState(false);
@@ -574,6 +574,18 @@ function App() {
       }
       setData(loaded);
       setLoading(false);
+      // Auto-pull from Sheet on startup if configured and token exists
+      var c=cfg();
+      if (c.sheetId && c.clientId && tokenValid()) {
+        try {
+          var sd=await readAll(c.sheetId);
+          if (sd.tasks && sd.tasks.length>0) {
+            setData(sd);
+            localStorage.setItem("icap_v4",JSON.stringify(sd));
+            flash("Synced from Sheet: "+sd.tasks.length+" tasks",3000);
+          }
+        } catch(e) { /* silent fail on startup - use local data */ }
+      }
     })();
   },[]);
 
@@ -592,12 +604,16 @@ function App() {
     localStorage.setItem("icap_v4",JSON.stringify(nd));
     var c=cfg();
     if (!c.sheetId) return;
+    // Only auto-sync if we have a valid token - don't pop up auth on every save
+    if (!tokenValid()) return;
     setSyncing(true);
     try {
-      var ok=await ensureAuth();
-      if (ok) { await writeAll(c.sheetId,nd); flash("Synced",2000); }
-      else { flash("Not signed in to Google - saved locally only",4000); }
-    } catch(e) { flash("Sync failed: "+e.message,5000); }
+      await writeAll(c.sheetId,nd);
+      flash("Saved",1500);
+    } catch(e) {
+      // Silent fail on auto-sync - data is already saved locally
+      console.warn("Auto-sync failed: "+e.message);
+    }
     setSyncing(false);
   },[data]);
 
@@ -773,6 +789,178 @@ function App() {
 
       <div style={{flex:1,overflow:"auto",padding:20}}>
 
+        {tab==="summary" && (
+          <div style={{display:"flex",flexDirection:"column",gap:16}}>
+
+            {(function() {
+              var today=new Date().toISOString().slice(0,10);
+              var todayFmt=new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
+
+              // Today's calendar events
+              var todayEvents=(data.events||[]).filter(function(e){ return e.start&&e.start.slice(0,10)===today; });
+              todayEvents.sort(function(a,b){ return a.start>b.start?1:-1; });
+
+              // Tasks due today
+              var todayTasks=(data.tasks||[]).filter(function(t){ return t.due_date&&t.due_date.slice(0,10)===today&&t.status!=="Complete"; });
+              todayTasks.sort(function(a,b){ var pa={Critical:0,High:1,Medium:2,Low:3}; return (pa[a.priority]||2)-(pa[b.priority]||2); });
+
+              // Leave next 2 weeks
+              var twoWeeks=new Date(); twoWeeks.setDate(twoWeeks.getDate()+14);
+              var twoWeeksStr=twoWeeks.toISOString().slice(0,10);
+              var upcomingLeave=(data.leave||[]).filter(function(l){
+                return l.end&&l.end>=today&&l.start&&l.start<=twoWeeksStr&&(l.status||"").toLowerCase()!=="cancelled";
+              });
+              upcomingLeave.sort(function(a,b){ return a.start>b.start?1:-1; });
+
+              // Travel: last week and next 2 weeks
+              var lastWeek=new Date(); lastWeek.setDate(lastWeek.getDate()-7);
+              var lastWeekStr=lastWeek.toISOString().slice(0,10);
+              var upcomingTravel=(data.travel||[]).filter(function(t){
+                return t.end&&t.end>=lastWeekStr&&t.start&&t.start<=twoWeeksStr;
+              });
+              upcomingTravel.sort(function(a,b){ return a.start>b.start?1:-1; });
+
+              // Unpaid taxes
+              var unpaidTaxes=(data.taxes||[]).filter(function(t){ return !t.paid_date||t.paid_date.trim()===""; });
+              unpaidTaxes.sort(function(a,b){ return (a.due_date||"")>(b.due_date||"")?1:-1; });
+
+              var SCard=function(props) {
+                return React.createElement("div",{style:{background:"#161b22",border:"1px solid #30363d",borderRadius:10,overflow:"hidden"}},
+                  React.createElement("div",{style:{padding:"10px 16px",background:"#21262d",display:"flex",justifyContent:"space-between",alignItems:"center"}},
+                    React.createElement("span",{style:{fontSize:13,fontWeight:700,color:"#f0f6fc"}},""+props.title),
+                    React.createElement("span",{style:{fontSize:11,background:"rgba(88,166,255,0.15)",color:"#58a6ff",padding:"2px 8px",borderRadius:10,fontWeight:600}},""+props.count)
+                  ),
+                  React.createElement("div",{style:{padding:"8px 0"}},props.children)
+                );
+              };
+
+              var EmptyRow=function(props) {
+                return React.createElement("div",{style:{padding:"8px 16px",fontSize:12,color:"#8b949e",fontStyle:"italic"}},""+props.msg);
+              };
+
+              var Divider=function() {
+                return React.createElement("div",{style:{height:1,background:"#21262d",margin:"0 16px"}});
+              };
+
+              return React.createElement(React.Fragment,null,
+
+                // Date header
+                React.createElement("div",{style:{fontSize:18,fontWeight:700,color:"#f0f6fc",marginBottom:4}},todayFmt),
+
+                // Today's Calendar
+                React.createElement(SCard,{title:"Today\'s Calendar",count:todayEvents.length},
+                  todayEvents.length===0
+                    ? React.createElement(EmptyRow,{msg:"No events scheduled today"})
+                    : todayEvents.map(function(e,i) {
+                        return React.createElement(React.Fragment,{key:e.id},
+                          i>0&&React.createElement(Divider,null),
+                          React.createElement("div",{style:{padding:"8px 16px"}},
+                            React.createElement("div",{style:{fontSize:13,fontWeight:500,color:"#f0f6fc"}},""+e.title),
+                            React.createElement("div",{style:{display:"flex",gap:10,marginTop:3,flexWrap:"wrap"}},
+                              React.createElement("span",{style:{fontSize:11,color:"#58a6ff"}},""+e.start.slice(11,16)||(e.start.slice(0,10))),
+                              e.location&&React.createElement("span",{style:{fontSize:11,color:"#8b949e"}},""+e.location)
+                            )
+                          )
+                        );
+                      })
+                ),
+
+                // Tasks Due Today
+                React.createElement(SCard,{title:"Tasks Due Today",count:todayTasks.length},
+                  todayTasks.length===0
+                    ? React.createElement(EmptyRow,{msg:"No tasks due today"})
+                    : todayTasks.map(function(t,i) {
+                        return React.createElement(React.Fragment,{key:t.id},
+                          i>0&&React.createElement(Divider,null),
+                          React.createElement("div",{style:{padding:"8px 16px",display:"flex",alignItems:"flex-start",gap:10}},
+                            React.createElement("div",{style:{width:3,height:36,borderRadius:2,background:P_COLOR[t.priority]||"#8b949e",flexShrink:0,marginTop:2}}),
+                            React.createElement("div",{style:{flex:1}},
+                              React.createElement("div",{style:{fontSize:13,fontWeight:500,color:"#f0f6fc"}},""+t.title),
+                              React.createElement("div",{style:{display:"flex",gap:8,marginTop:3,flexWrap:"wrap"}},
+                                React.createElement("span",{style:{fontSize:11,color:P_COLOR[t.priority]||"#8b949e"}},""+t.priority),
+                                t.category&&React.createElement("span",{style:{fontSize:11,color:"#58a6ff"}},""+t.category),
+                                t.owner&&React.createElement("span",{style:{fontSize:11,color:"#8b949e"}},""+t.owner)
+                              )
+                            ),
+                            React.createElement("button",{
+                              onClick:function(){save({tasks:(data.tasks||[]).map(function(tk){return tk.id===t.id?Object.assign({},tk,{status:"Complete"}):tk;})});},
+                              style:{background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.4)",color:"#22c55e",borderRadius:7,padding:"4px 10px",cursor:"pointer",fontSize:14,fontWeight:700,flexShrink:0}
+                            },"\u2713")
+                          )
+                        );
+                      })
+                ),
+
+                // Leave next 2 weeks
+                React.createElement(SCard,{title:"Leave - Next 2 Weeks",count:upcomingLeave.length},
+                  upcomingLeave.length===0
+                    ? React.createElement(EmptyRow,{msg:"No leave scheduled in next 2 weeks"})
+                    : upcomingLeave.map(function(l,i) {
+                        return React.createElement(React.Fragment,{key:l.id},
+                          i>0&&React.createElement(Divider,null),
+                          React.createElement("div",{style:{padding:"8px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
+                            React.createElement("div",null,
+                              React.createElement("div",{style:{fontSize:13,fontWeight:500,color:"#f0f6fc"}},""+l.member),
+                              React.createElement("div",{style:{fontSize:11,color:"#8b949e",marginTop:2}},""+(l.type||"Leave"))
+                            ),
+                            React.createElement("div",{style:{textAlign:"right"}},
+                              React.createElement("div",{style:{fontSize:12,color:"#58a6ff"}},""+l.start+" -> "+l.end),
+                              l.status&&React.createElement("div",{style:{fontSize:11,color:"#8b949e"}},""+l.status)
+                            )
+                          )
+                        );
+                      })
+                ),
+
+                // Travel
+                React.createElement(SCard,{title:"Travel - Last Week & Next 2 Weeks",count:upcomingTravel.length},
+                  upcomingTravel.length===0
+                    ? React.createElement(EmptyRow,{msg:"No travel in this window"})
+                    : upcomingTravel.map(function(t,i) {
+                        var isPast=t.end<today;
+                        return React.createElement(React.Fragment,{key:t.id},
+                          i>0&&React.createElement(Divider,null),
+                          React.createElement("div",{style:{padding:"8px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6,opacity:isPast?0.6:1}},
+                            React.createElement("div",null,
+                              React.createElement("div",{style:{fontSize:13,fontWeight:500,color:"#f0f6fc"}},""+t.member),
+                              React.createElement("div",{style:{fontSize:11,color:"#8b949e",marginTop:2}},""+t.location+(t.contract?" - "+t.contract:""))
+                            ),
+                            React.createElement("div",{style:{textAlign:"right"}},
+                              React.createElement("div",{style:{fontSize:12,color:isPast?"#8b949e":"#58a6ff"}},""+t.start+" -> "+t.end),
+                              isPast&&React.createElement("div",{style:{fontSize:10,color:"#8b949e"}}, "past")
+                            )
+                          )
+                        );
+                      })
+                ),
+
+                // Unpaid Taxes
+                React.createElement(SCard,{title:"Taxes Unpaid",count:unpaidTaxes.length},
+                  unpaidTaxes.length===0
+                    ? React.createElement(EmptyRow,{msg:"All taxes paid"})
+                    : unpaidTaxes.map(function(t,i) {
+                        var isOverdueTax=t.due_date&&t.due_date<today;
+                        return React.createElement(React.Fragment,{key:t.id},
+                          i>0&&React.createElement(Divider,null),
+                          React.createElement("div",{style:{padding:"8px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}},
+                            React.createElement("div",null,
+                              React.createElement("div",{style:{fontSize:13,fontWeight:500,color:isOverdueTax?"#ef4444":"#f0f6fc"}},""+t.tax_type),
+                              t.eft_deadline&&React.createElement("div",{style:{fontSize:11,color:"#8b949e",marginTop:2}},"EFT: "+t.eft_deadline)
+                            ),
+                            React.createElement("div",{style:{textAlign:"right"}},
+                              React.createElement("div",{style:{fontSize:12,color:isOverdueTax?"#ef4444":"#f59e0b"}},"Due: "+(t.due_date||"TBD")),
+                              t.amount_due&&React.createElement("div",{style:{fontSize:11,color:"#8b949e"}},""+t.amount_due)
+                            )
+                          )
+                        );
+                      })
+                )
+
+              );
+            })()}
+
+          </div>
+        )}
         {tab==="tasks" && (
           <div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:10,marginBottom:20}}>
