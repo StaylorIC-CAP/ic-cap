@@ -4,7 +4,6 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>IC-CAP Command Center</title>
-<link rel="canonical" href="https://stayloric-cap.github.io/ic-cap/"/>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -107,14 +106,13 @@ async function apiGet(sheetId, range) {
   var apikey=localStorage.getItem("icap_apikey");
   var url="https://sheets.googleapis.com/v4/spreadsheets/"+sheetId+"/values/"+encodeURIComponent(range);
   var r;
-  if (token) {
+  if (token && tokenValid()) {
     r=await fetch(url,{headers:{Authorization:"Bearer "+token}});
   } else if (apikey) {
     r=await fetch(url+"?key="+apikey);
   } else {
-    throw new Error("Not authenticated - please sign in via Setup");
+    throw new Error("Not authenticated");
   }
-  if (r.status===401) { localStorage.removeItem("icap_gtoken"); localStorage.removeItem("icap_gtoken_exp"); throw new Error("Session expired - please try again"); }
   if (!r.ok) throw new Error("Read failed: "+r.status);
   return r.json();
 }
@@ -122,24 +120,14 @@ async function apiPut(sheetId, range, values) {
   var token=getToken();
   var url="https://sheets.googleapis.com/v4/spreadsheets/"+sheetId+"/values/"+encodeURIComponent(range)+"?valueInputOption=USER_ENTERED";
   var r=await fetch(url,{method:"PUT",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({range:range,majorDimension:"ROWS",values:values})});
-  if (r.status===401) { localStorage.removeItem("icap_gtoken"); localStorage.removeItem("icap_gtoken_exp"); throw new Error("Token expired - please click Connect Google in Setup, then try again."); }
   if (!r.ok) throw new Error("Write failed: "+r.status);
   return r.json();
 }
 async function apiClear(sheetId, range) {
   var token=getToken();
-  if (!token) throw new Error("Not signed in to Google");
   var url="https://sheets.googleapis.com/v4/spreadsheets/"+sheetId+"/values/"+encodeURIComponent(range)+":clear";
   var r=await fetch(url,{method:"POST",headers:{Authorization:"Bearer "+token}});
-  if (r.status===401) {
-    localStorage.removeItem("icap_gtoken");
-    localStorage.removeItem("icap_gtoken_exp");
-    throw new Error("Google session expired. The sign-in window may have been blocked. Please allow popups for this site, then try again.");
-  }
-  if (!r.ok) {
-    var body=""; try { body=await r.text(); } catch(e) {}
-    throw new Error("Clear failed: "+r.status+" "+body.slice(0,100));
-  }
+  if (!r.ok) throw new Error("Clear failed: "+r.status);
 }
 async function ensureTabs(sheetId) {
   var token=getToken();
@@ -178,8 +166,8 @@ async function readAll(sheetId) {
   var out={};
   for (var i=0;i<pairs.length;i++) {
     var key=pairs[i][0], tab=pairs[i][1], cols=pairs[i][2];
-    try { var res=await apiGet(sheetId,tab+"!A:Z"); out[key]=fromRows(res.values||[],cols); }
-    catch(e) { out[key]=[]; console.warn("Could not read tab "+tab+": "+e.message); }
+    try { var res=await apiGet(sheetId,tab+"!A:Z"); out[key]=fromRows(res.values,cols); }
+    catch(e) { out[key]=[]; }
   }
   return out;
 }
@@ -388,7 +376,7 @@ function SetupPanel(props) {
       setTimeout(function(){props.onDone();},800);
     } catch(e) {
       if (e.message==="POPUP_BLOCKED") {
-        setStatus("Popup blocked. Please allow popups for stayloric-cap.github.io, then try again. Or use an API key instead (see Step 2).");
+        setStatus("Popup blocked. Please allow popups for claudeusercontent.com, then try again. Or use an API key instead (see Step 2).");
       } else {
         setStatus("Error: "+e.message);
       }
@@ -524,6 +512,10 @@ function App() {
   const [parseResult,setParseResult]=useState("");
   const [parsedRecords,setParsedRecords]=useState(null);
   const [parseLoading,setParseLoading]=useState(false);
+  const [showImport,setShowImport]=useState(false);
+  const [importText,setImportText]=useState("");
+  const [showExportText,setShowExportText]=useState(false);
+  const [syncCode,setSyncCode]=useState("");
 
   var flash=function(msg,ms) { setSyncMsg(msg); if(ms) setTimeout(function(){setSyncMsg("");},ms); };
 
@@ -580,18 +572,6 @@ function App() {
       }
       setData(loaded);
       setLoading(false);
-      // Auto-pull from Sheet on startup if configured and token exists
-      var c=cfg();
-      if (c.sheetId && c.clientId && tokenValid()) {
-        try {
-          var sd=await readAll(c.sheetId);
-          if (sd.tasks && sd.tasks.length>0) {
-            setData(sd);
-            localStorage.setItem("icap_v4",JSON.stringify(sd));
-            flash("Synced from Sheet: "+sd.tasks.length+" tasks",3000);
-          }
-        } catch(e) { /* silent fail on startup - use local data */ }
-      }
     })();
   },[]);
 
@@ -610,16 +590,12 @@ function App() {
     localStorage.setItem("icap_v4",JSON.stringify(nd));
     var c=cfg();
     if (!c.sheetId) return;
-    // Only auto-sync if we have a valid token - don't pop up auth on every save
-    if (!tokenValid()) return;
     setSyncing(true);
     try {
-      await writeAll(c.sheetId,nd);
-      flash("Saved",1500);
-    } catch(e) {
-      // Silent fail on auto-sync - data is already saved locally
-      console.warn("Auto-sync failed: "+e.message);
-    }
+      var ok=await ensureAuth();
+      if (ok) { await writeAll(c.sheetId,nd); flash("Synced",2000); }
+      else { flash("Not signed in to Google - saved locally only",4000); }
+    } catch(e) { flash("Sync failed: "+e.message,5000); }
     setSyncing(false);
   },[data]);
 
@@ -648,25 +624,17 @@ function App() {
     if (!c.sheetId) { alert("No Sheet ID configured. Click Setup."); return; }
     if (!c.clientId) { alert("No Client ID configured. Click Setup."); return; }
     setSyncing(true);
-    var doPush=async function() {
-      // Always force a fresh token before pushing
-      localStorage.removeItem("icap_gtoken");
-      localStorage.removeItem("icap_gtoken_exp");
-      flash("Signing in to Google...",0);
-      var ok=await ensureAuth(true);
+    flash("Pushing all data to Sheet...",0);
+    try {
+      var ok=await ensureAuth();
       if (!ok) throw new Error("Google sign-in failed or was cancelled");
       flash("Ensuring sheet tabs exist...",0);
       await ensureTabs(c.sheetId);
       flash("Writing data...",0);
       await writeAll(c.sheetId,data);
-    };
-    try {
-      await doPush();
       var counts="Tasks:"+((data.tasks||[]).length)+" Members:"+((data.members||[]).length)+" BD:"+((data.bd_opportunities||[]).length);
       flash("Done! "+counts,5000);
-    } catch(e) {
-      flash("Push failed: "+e.message,8000);
-    }
+    } catch(e) { flash("Push failed: "+e.message,8000); }
     setSyncing(false);
   };
 
@@ -972,6 +940,8 @@ function App() {
             <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:10,marginBottom:20}}>
               {[{l:"Total",v:stats.total,c:"#58a6ff"},{l:"Open",v:stats.open,c:"#8b949e"},{l:"In Progress",v:stats.inprog,c:"#3b82f6"},{l:"Complete",v:stats.done,c:"#22c55e"},{l:"Overdue",v:stats.overdue,c:"#ef4444"},{l:"High Pri",v:stats.high,c:"#f97316"}].map(function(s){
                 return <div key={s.l} style={{background:"#161b22",border:"1px solid "+s.c+"33",borderRadius:10,padding:"12px 14px"}}><div style={{fontSize:22,fontWeight:700,color:s.c}}>{s.v}</div><div style={{fontSize:11,color:"#8b949e",marginTop:2}}>{s.l}</div></div>;
+              })}
+            </div>
             <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
               <input value={filter.search} onChange={function(e){setFilter(function(f){return Object.assign({},f,{search:e.target.value});});}} placeholder="Search..." style={{background:"#21262d",border:"1px solid #30363d",borderRadius:8,padding:"6px 12px",color:"#c9d1d9",fontSize:13,width:180,outline:"none"}} />
               <select value={filter.status} onChange={function(e){setFilter(function(f){return Object.assign({},f,{status:e.target.value});});}} style={{background:"#21262d",border:"1px solid #30363d",color:"#c9d1d9",borderRadius:8,padding:"6px 10px",fontSize:13}}>
@@ -1106,11 +1076,9 @@ function App() {
                         <div><div style={{fontSize:10,color:"#8b949e",marginBottom:4,fontWeight:600}}>LINK</div>{task.link?<a href={task.link} target="_blank" rel="noreferrer" style={{fontSize:12,color:"#58a6ff"}}>{task.link}</a>:<span style={{fontSize:12,color:"#8b949e"}}>-</span>}</div>
                       </div>
                     )}
-                  </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  </div>
+                  )}
+              )}
               {filtered.length===0 && <Empty msg="No tasks match your filters" />}
             </div>
           </div>
@@ -1134,10 +1102,7 @@ function App() {
                     </div>
                     <button onClick={function(){save({events:events.filter(function(e){return e.id!==ev.id;})});}} style={{background:"none",border:"none",color:"#6e7681",cursor:"pointer",fontSize:14,flexShrink:0}}>X</button>
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
             </div>
           </div>
         )}
@@ -1155,10 +1120,7 @@ function App() {
                     </div>
                     {m.last_email && <div style={{fontSize:12,color:"#8b949e",marginTop:6}}>Last email: {fmtDate(m.last_email)}</div>}
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
             </div>
           </div>
         )}
@@ -1181,10 +1143,7 @@ function App() {
                     </div>
                     {op.owner && <div style={{fontSize:11,color:"#8b949e",whiteSpace:"nowrap"}}>{op.owner}</div>}
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
             </div>
           </div>
         )}
@@ -1205,10 +1164,7 @@ function App() {
                       <div style={{fontSize:12,color:"#8b949e"}}>to {fmtDate(l.end)}  {l.status}</div>
                     </div>
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
             </div>
           </div>
         )}
@@ -1229,10 +1185,7 @@ function App() {
                       <div style={{fontSize:11,color:"#8b949e"}}>{t.paid_date?"Paid "+fmtDate(t.paid_date):"UNPAID"}</div>
                     </div>
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
             </div>
           </div>
         )}
@@ -1252,10 +1205,7 @@ function App() {
                       {t.expense_amount && <div style={{fontWeight:700,fontSize:13,color:"#58a6ff"}}>${parseFloat(t.expense_amount).toLocaleString()}</div>}
                     </div>
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
             </div>
           </div>
         )}
@@ -1276,10 +1226,7 @@ function App() {
                     </div>
                     {c.notes && <div style={{fontSize:12,color:"#8b949e",marginTop:10,borderTop:"1px solid #21262d",paddingTop:8,lineHeight:1.6}}>{c.notes}</div>}
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
             </div>
           </div>
         )}
@@ -1335,6 +1282,164 @@ function App() {
               </div>
             </div>
             <SyncPanel onPush={pushSheet} onPull={pullSheet} />
+            <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
+              <div style={{fontSize:13,fontWeight:700,color:"#f0f6fc",marginBottom:4}}>Smart Paste - Create from Email or Document</div>
+              <div style={{fontSize:12,color:"#8b949e",marginBottom:12}}>Paste any email, form, or text below. AI will extract the details and create the right record automatically.</div>
+              <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+                <label style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.3)",borderRadius:7,color:"#58a6ff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+                  <span>Upload PDF</span>
+                  <input type="file" accept=".pdf,application/pdf" style={{display:"none"}} onChange={function(e){
+                    var file=e.target.files[0];
+                    if (!file) return;
+                    setParseLoading(true);
+                    setParseResult("Reading PDF...");
+                    var reader=new FileReader();
+                    reader.onload=async function(ev){
+                      try {
+                        var base64=ev.target.result.split(",")[1];
+                        var resp=await fetch("https://api.anthropic.com/v1/messages",{
+                          method:"POST",
+                          headers:{"Content-Type":"application/json"},
+                          body:JSON.stringify({
+                            model:"claude-sonnet-4-20250514",
+                            max_tokens:2000,
+                            messages:[{role:"user",content:[
+                              {type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},
+                              {type:"text",text:"Extract all actionable information from this document. Return ONLY a JSON object with no markdown. Today is "+new Date().toISOString().slice(0,10)+". The JSON must have a \"type\" field (task/event/leave/travel/conference/tax) and a \"records\" array. task:{title,due_date(YYYY-MM-DD),priority(High/Medium/Low),notes,next_action,category,owner,status:\"Not Started\"} event:{title,start(YYYY-MM-DD or YYYY-MM-DD HH:MM),end,location,notes} leave:{member,start,end,type(PTO/Sick/Holiday/Other),status:\"Approved\",notes} travel:{member,location,start,end,contract,notes} conference:{name,start,end,location,status,attendee,notes} tax:{tax_type,due_date,amount_due,eft_deadline,paid_date:\"\"}"}
+                            ]}]}
+                          })
+                        });
+                        var d=await resp.json();
+                        var raw=(d.content&&d.content[0]&&d.content[0].text)||"";
+                        raw=raw.replace(/```json|```/g,"").trim();
+                        var parsed=JSON.parse(raw);
+                        var records=parsed.records||[parsed];
+                        var type=parsed.type||"task";
+                        setParsedRecords({type:type,records:records});
+                        var summary=records.length+" "+type+(records.length>1?"s":"")+" found in PDF:\n";
+                        records.forEach(function(r,i){
+                          if (type==="task") summary+="  "+(i+1)+". ["+(r.priority||"Medium")+"] "+(r.title||"Untitled")+" - Due: "+(r.due_date||"TBD")+"\n";
+                          else if (type==="event") summary+="  "+(i+1)+". "+(r.title||"Untitled")+" on "+(r.start||"TBD")+"\n";
+                          else if (type==="leave") summary+="  "+(i+1)+". "+(r.member||"?")+" "+(r.start||"?")+" to "+(r.end||"?")+"\n";
+                          else if (type==="travel") summary+="  "+(i+1)+". "+(r.member||"?")+" to "+(r.location||"?")+" "+(r.start||"?")+"\n";
+                          else if (type==="conference") summary+="  "+(i+1)+". "+(r.name||"Untitled")+" "+(r.start||"?")+"\n";
+                          else if (type==="tax") summary+="  "+(i+1)+". "+(r.tax_type||"Tax")+" due "+(r.due_date||"?")+"\n";
+                        });
+                        setParseResult(summary+"\nReview above and click Add to save.");
+                      } catch(err) {
+                        setParseResult("PDF read failed: "+err.message);
+                        setParsedRecords(null);
+                      }
+                      setParseLoading(false);
+                    };
+                    reader.onerror=function(){ setParseResult("Could not read file."); setParseLoading(false); };
+                    reader.readAsDataURL(file);
+                    e.target.value="";
+                  }} />
+                </label>
+                <label style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.3)",borderRadius:7,color:"#58a6ff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+                  <span>Upload Email (.eml)</span>
+                  <input type="file" accept=".eml,.msg,.txt,message/rfc822" style={{display:"none"}} onChange={function(e){
+                    var file=e.target.files[0];
+                    if (!file) return;
+                    setParseLoading(true);
+                    setParseResult("Reading email...");
+                    var reader=new FileReader();
+                    reader.onload=function(ev){
+                      var text=ev.target.result;
+                      // Strip email headers for cleaner parsing, keep body
+                      var body=text;
+                      var headerEnd=text.indexOf("\n\n");
+                      if (headerEnd>0) body=text.slice(headerEnd+2);
+                      setParseText(body.slice(0,4000));
+                      setParseResult("Email loaded - click Analyze Text to extract records.");
+                      setParseLoading(false);
+                    };
+                    reader.onerror=function(){ setParseResult("Could not read file."); setParseLoading(false); };
+                    reader.readAsText(file);
+                    e.target.value="";
+                  }} />
+                </label>
+              </div>
+              <textarea value={parseText} onChange={function(e){setParseText(e.target.value);}} placeholder={"Paste email, PDF text, form, or any message here...\n\nExamples:\n- Meeting invite -> Calendar event\n- Leave request email -> Leave record\n- Tax notice -> Tax record or task\n- Conference announcement -> Conference record\n- Travel itinerary -> Travel record\n- Any email with action items -> Tasks"} rows={8} style={{width:"100%",background:"#0d1117",border:"1px solid #30363d",borderRadius:7,padding:"10px 12px",color:"#c9d1d9",fontSize:12,outline:"none",resize:"vertical",boxSizing:"border-box",lineHeight:1.6}} />
+              {parseResult && (
+                <div style={{margin:"10px 0",background:"#0d1117",border:"1px solid #238636",borderRadius:7,padding:"12px",fontSize:12,color:"#c9d1d9",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{parseResult}</div>
+              )}
+              <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
+                <button onClick={async function(){
+                  if (!parseText.trim()) return;
+                  setParseLoading(true);
+                  setParseResult("");
+                  var today=new Date().toISOString().slice(0,10);
+                  var systemPrompt="You are a data extraction assistant for a business management app. Extract structured data from the provided text and return ONLY a JSON object with no markdown, no explanation, no backticks.\n\nToday is "+today+".\n\nThe JSON must have a \"type\" field (one of: task, event, leave, travel, conference, tax) and a \"records\" array.\nEach record should match these schemas:\n\ntask: {title, due_date (YYYY-MM-DD), priority (High/Medium/Low), notes, next_action, category, owner, status:\"Not Started\"}\nevent: {title, start (YYYY-MM-DD or YYYY-MM-DD HH:MM), end, location, notes}\nleave: {member, start (YYYY-MM-DD), end (YYYY-MM-DD), type (PTO/Sick/Holiday/Other), status:\"Approved\", notes}\ntravel: {member, location, start (YYYY-MM-DD), end (YYYY-MM-DD), contract, notes}\nconference: {name, start (YYYY-MM-DD), end (YYYY-MM-DD), location, status, attendee, notes}\ntax: {tax_type, due_date (YYYY-MM-DD), amount_due, eft_deadline, paid_date:\"\"}\n\nIf the text contains multiple types, return the most prominent one. If unclear, default to task.\nAlways return multiple records if multiple items are mentioned.\nReturn ONLY valid JSON.";
+                  try {
+                    var resp=await fetch("https://api.anthropic.com/v1/messages",{
+                      method:"POST",
+                      headers:{"Content-Type":"application/json"},
+                      body:JSON.stringify({
+                        model:"claude-sonnet-4-20250514",
+                        max_tokens:1000,
+                        system:systemPrompt,
+                        messages:[{role:"user",content:parseText.trim()}]
+                      })
+                    });
+                    var d=await resp.json();
+                    var raw=d.content&&d.content[0]&&d.content[0].text||"";
+                    raw=raw.replace(/```json|```/g,"").trim();
+                    var parsed=JSON.parse(raw);
+                    var records=parsed.records||[parsed];
+                    var type=parsed.type||"task";
+                    setParsedRecords({type:type,records:records});
+                    var summary=records.length+" "+type+(records.length>1?"s":"")+" found:\n";
+                    records.forEach(function(r,i){
+                      if (type==="task") summary+="  "+(i+1)+". ["+(r.priority||"Medium")+"] "+(r.title||"Untitled")+" - Due: "+(r.due_date||"TBD")+"\n";
+                      else if (type==="event") summary+="  "+(i+1)+". "+(r.title||"Untitled")+" on "+(r.start||"TBD")+"\n";
+                      else if (type==="leave") summary+="  "+(i+1)+". "+(r.member||"?")+" - "+(r.start||"?")+" to "+(r.end||"?")+" ("+(r.type||"Leave")+")\n";
+                      else if (type==="travel") summary+="  "+(i+1)+". "+(r.member||"?")+" to "+(r.location||"?")+" "+(r.start||"?")+" to "+(r.end||"?")+"\n";
+                      else if (type==="conference") summary+="  "+(i+1)+". "+(r.name||"Untitled")+" at "+(r.location||"?")+" "+(r.start||"?")+"\n";
+                      else if (type==="tax") summary+="  "+(i+1)+". "+(r.tax_type||"Tax")+" due "+(r.due_date||"?")+" amt: "+(r.amount_due||"?")+"\n";
+                    });
+                    setParseResult(summary+"\nReview above and click Add to save.");
+                  } catch(e) {
+                    setParseResult("Error: "+e.message);
+                    setParsedRecords(null);
+                  }
+                  setParseLoading(false);
+                }} disabled={!parseText.trim()||parseLoading} style={{padding:"8px 18px",borderRadius:7,border:"1px solid rgba(88,166,255,0.4)",background:parseText.trim()&&!parseLoading?"rgba(88,166,255,0.15)":"#21262d",color:parseText.trim()&&!parseLoading?"#58a6ff":"#8b949e",fontSize:13,fontWeight:600,cursor:parseText.trim()&&!parseLoading?"pointer":"default"}}>
+                  {parseLoading?"Analyzing...":"Analyze Text"}
+                </button>
+                {parsedRecords && (
+                  <button onClick={function(){
+                    var type=parsedRecords.type;
+                    var records=parsedRecords.records;
+                    var newData=Object.assign({},data);
+                    var maxId=function(arr){return arr&&arr.length?Math.max.apply(null,arr.map(function(x){return x.id||0;})):0;};
+                    records.forEach(function(r,i){
+                      var id=maxId(newData[type==="task"?"tasks":type==="event"?"events":type==="leave"?"leave":type==="travel"?"travel":type==="conference"?"conferences":"taxes"])+i+1;
+                      var rec=Object.assign({id:id},r);
+                      if (type==="task") newData.tasks=(newData.tasks||[]).concat([rec]);
+                      else if (type==="event") newData.events=(newData.events||[]).concat([rec]);
+                      else if (type==="leave") newData.leave=(newData.leave||[]).concat([rec]);
+                      else if (type==="travel") newData.travel=(newData.travel||[]).concat([rec]);
+                      else if (type==="conference") newData.conferences=(newData.conferences||[]).concat([rec]);
+                      else if (type==="tax") newData.taxes=(newData.taxes||[]).concat([rec]);
+                    });
+                    save(newData);
+                    setParseResult("Added "+records.length+" "+type+(records.length>1?"s":"")+" successfully!");
+                    setParsedRecords(null);
+                    setParseText("");
+                    setTimeout(function(){setParseResult("");},4000);
+                  }} style={{padding:"8px 18px",borderRadius:7,border:"1px solid #2ea043",background:"#238636",color:"#fff",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                    Add {parsedRecords.records.length} {parsedRecords.type}{parsedRecords.records.length>1?"s":""}
+                  </button>
+                )}
+                {(parseText||parseResult) && (
+                  <button onClick={function(){setParseText("");setParseResult("");setParsedRecords(null);}} style={{padding:"8px 14px",borderRadius:7,border:"1px solid #30363d",background:"#21262d",color:"#8b949e",fontSize:13,cursor:"pointer"}}>
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
 
             <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
               <div style={{fontSize:13,fontWeight:700,color:"#f0f6fc",marginBottom:4}}>Smart Paste - Create from Email or Document</div>
@@ -1513,17 +1618,570 @@ function App() {
                   <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
                     <div style={{maxWidth:"82%",padding:"9px 13px",borderRadius:10,background:m.role==="user"?"#1f6feb":"#21262d",border:m.role==="assistant"?"1px solid #30363d":"none",fontSize:13,lineHeight:1.6,whiteSpace:"pre-wrap",color:m.role==="user"?"#f0f6fc":"#c9d1d9"}}>{m.text}</div>
                   </div>);
-                  });
-                });
-                return rows;
-              })()}
+                  })}
               {aiLoading && <div style={{display:"flex"}}><div style={{padding:"9px 13px",borderRadius:10,background:"#21262d",border:"1px solid #30363d",fontSize:13,color:"#8b949e"}}>Thinking...</div></div>}
             </div>
             <div style={{display:"flex",gap:8}}>
               <input value={aiInput} onChange={function(e){setAiInput(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter"&&!e.shiftKey)runAI();}} placeholder="Ask about your data..." style={{flex:1,background:"#21262d",border:"1px solid #30363d",borderRadius:8,padding:"9px 13px",color:"#c9d1d9",fontSize:13,outline:"none"}} />
               <Btn onClick={runAI} disabled={aiLoading||!aiInput.trim()} style={{background:"#238636",border:"1px solid #2ea043",color:"#f0f6fc",fontWeight:600,opacity:(aiLoading||!aiInput.trim())?0.5:1}}>Send</Btn>
             </div>
+        )}
+
+      </div>
+
+      {showImport && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999,padding:16}}>
+          <div style={{background:"#161b22",borderRadius:12,padding:22,width:"100%",maxWidth:520,border:"1px solid #30363d",display:"flex",flexDirection:"column",gap:12,maxHeight:"90vh",overflowY:"auto"}}>
+            <div style={{fontWeight:600,fontSize:15,color:"#f0f6fc"}}>Load with Sync Code</div>
+            <div style={{fontSize:12,color:"#8b949e",lineHeight:1.8}}>
+              1. On your laptop click <b style={{color:"#58a6ff"}}>Generate Sync Code</b><br/>
+              2. A 6-character code will appear on screen<br/>
+              3. Type that code below on your phone
+            </div>
+            <input
+              value={importText}
+              onChange={function(e){setImportText(e.target.value.toUpperCase().replace(/[^A-F0-9]/g,"").slice(0,6));}}
+              placeholder="Enter 6-char code e.g. A3F9B2"
+              maxLength={6}
+              style={{width:"100%",background:"#0d1117",border:"2px solid #58a6ff",borderRadius:7,padding:"16px",color:"#58a6ff",fontSize:28,fontWeight:700,outline:"none",boxSizing:"border-box",textAlign:"center",letterSpacing:8,fontFamily:"monospace"}}
+            />
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={function(){setShowImport(false);setImportText("");}} style={{flex:1,padding:"14px",borderRadius:8,border:"1px solid #30363d",background:"#21262d",color:"#c9d1d9",cursor:"pointer",fontSize:14,fontWeight:500}}>Cancel</button>
+              <button onClick={async function(){
+                if (importText.length!==6) { flash("Enter the full 6-character code",3000); return; }
+                flash("Loading...",0);
+                try {
+                  var stored=localStorage.getItem("icap_synccode")||"";
+                  var binId=stored.slice(-6).toUpperCase()===importText ? stored : null;
+                  if (!binId) {
+                    var search=await fetch("https://api.jsonbin.io/v3/b?meta=false");
+                    var bins=await search.json();
+                    if (Array.isArray(bins)) {
+                      for (var i=0;i<bins.length;i++) {
+                        if (bins[i].id&&bins[i].id.slice(-6).toUpperCase()===importText) { binId=bins[i].id; break; }
+                      }
+                    }
+                  }
+                  if (!binId) {
+                    var r2=await fetch("https://api.jsonbin.io/v3/b/latest?meta=false");
+                    flash("Code not found locally - try downloading backup instead",5000);
+                    return;
+                  }
+                  var r=await fetch("https://api.jsonbin.io/v3/b/"+binId+"/latest");
+                  var d=await r.json();
+                  var imported=d.record||d;
+                  if (!imported.tasks) { flash("Invalid data in sync code",4000); return; }
+                  setData(imported);
+                  localStorage.setItem("icap_v4",JSON.stringify(imported));
+                  flash("Loaded! Tasks:"+imported.tasks.length,4000);
+                  setShowImport(false);
+                  setImportText("");
+                } catch(e) { flash("Load failed: "+e.message,5000); }
+              }} disabled={importText.length!==6} style={{flex:1,padding:"14px",borderRadius:8,border:"1px solid #2ea043",background:importText.length===6?"#238636":"#21262d",color:importText.length===6?"#f0f6fc":"#8b949e",cursor:importText.length===6?"pointer":"default",fontSize:14,fontWeight:700}}>
+                Load Data
+              </button>
+            </div>
           </div>
+        </div>
+      )}
+      {showExportText && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:999,padding:16}}>
+          <div style={{background:"#161b22",borderRadius:12,padding:22,width:"100%",maxWidth:520,border:"1px solid #30363d",display:"flex",flexDirection:"column",gap:12,maxHeight:"90vh",overflowY:"auto"}}>
+            <div style={{fontWeight:600,fontSize:15,color:"#f0f6fc"}}>Copy Your Data</div>
+            <div style={{fontSize:12,color:"#8b949e"}}>Select all the text below and copy it, then send it to your other device.</div>
+            <textarea readOnly value={JSON.stringify(data)} rows={8} style={{width:"100%",background:"#0d1117",border:"1px solid #30363d",borderRadius:7,padding:"10px",color:"#c9d1d9",fontSize:11,outline:"none",resize:"none",boxSizing:"border-box"}} onClick={function(e){e.target.select();}} />
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={function(){setShowExportText(false);}} style={{flex:1,padding:"14px",borderRadius:8,border:"1px solid #30363d",background:"#21262d",color:"#c9d1d9",cursor:"pointer",fontSize:14}}>Close</button>
+              <button onClick={function(){
+                var ta=document.querySelector("textarea[readonly]");
+                if(ta){ta.select();document.execCommand("copy");flash("Copied!",2000);}
+              }} style={{flex:1,padding:"14px",borderRadius:8,border:"1px solid #388bfd",background:"#1f6feb",color:"#fff",cursor:"pointer",fontSize:14,fontWeight:700}}>Select All + Copy</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showAdd && tab==="tasks" && <TaskModal onSave={async function(d){var newId=Math.max.apply(null,tasks.map(function(t){return parseInt(t.id)||0;}).concat([0]))+1;await save({tasks:tasks.concat([Object.assign({id:newId},d)])});setShowAdd(false);}} onClose={function(){setShowAdd(false);}} />}
+      {showAdd && tab==="calendar" && <EventModal onSave={async function(d){var newId=Math.max.apply(null,events.map(function(e){return parseInt(e.id)||0;}).concat([0]))+1;await save({events:events.concat([Object.assign({id:newId},d)])});setShowAdd(false);}} onClose={function(){setShowAdd(false);}} />}
+      {editItem&&editItem.type==="task" && <TaskModal task={editItem.item} onSave={async function(d){await save({tasks:tasks.map(function(t){return t.id===editItem.item.id?Object.assign({},t,d):t;})});setEditItem(null);}} onDelete={async function(){await save({tasks:tasks.filter(function(t){return t.id!==editItem.item.id;})});setEditItem(null);}} onClose={function(){setEditItem(null);}} />}
+      {editItem&&editItem.type==="member" && <MemberModal member={editItem.item} onClose={function(){setEditItem(null);}} />}
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+var today=new Date().toISOString().slice(0,10);
+                var tom=new Date(); tom.setDate(tom.getDate()+1);
+                var tomStr=tom.toISOString().slice(0,10);
+                function getLabel(task){
+                  var d=task.due_date?task.due_date.slice(0,10):"";
+                  if (!d) return "No Due Date";
+                  if (d<today) return "Overdue";
+                  if (d===today) return "Today";
+                  if (d===tomStr) return "Tomorrow";
+                  return new Date(d+"T00:00:00").toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric",year:"numeric"});
+                }
+                function labelRank(l){ return l==="Overdue"?0:l==="Today"?1:l==="Tomorrow"?2:l==="No Due Date"?999:3; }
+                var groups={}; var groupOrder=[];
+                filtered.slice(0,200).forEach(function(task){
+                  var label=getLabel(task);
+                  if (!groups[label]){groups[label]=[];groupOrder.push(label);}
+                  groups[label].push(task);
+                });
+                groupOrder.sort(function(a,b){
+                  var ra=labelRank(a), rb=labelRank(b);
+                  if(ra!==rb) return ra-rb;
+                  return a>b?1:-1;
+                });
+                var rows=[];
+                groupOrder.forEach(function(label,gi){
+                  var isOverdueGrp=label==="Overdue";
+                  var isTodayGrp=label==="Today";
+                  rows.push(<div key={"hdr-"+label} style={{padding:"8px 4px 4px",fontSize:11,fontWeight:700,color:isOverdueGrp?"#ef4444":isTodayGrp?"#22c55e":"#8b949e",textTransform:"uppercase",letterSpacing:1,borderBottom:"1px solid #21262d",marginBottom:6,marginTop:gi>0?14:0}}>{label} ({groups[label].length})</div>);
+                  groups[label].forEach(function(task){
+                    var over=isOverdueGrp;
+                    var expanded=expandedTask===task.id;
+                    rows.push(<div key={task.id} style={{background:"#161b22",borderRadius:8,border:"1px solid "+(over?"#ef444433":expanded?"#58a6ff55":"#30363d"),overflow:"hidden",marginBottom:6}}>
+                    <div style={{padding:"10px 14px",display:"flex",alignItems:"center",gap:10,cursor:"pointer"}} onClick={function(){setExpandedTask(expanded?null:task.id);}}>
+                      <input type="checkbox" checked={!!selectedTasks[task.id]} onChange={function(e){e.stopPropagation();setSelectedTasks(function(prev){var n=Object.assign({},prev);n[task.id]=e.target.checked;return n;});}} onClick={function(e){e.stopPropagation();}} style={{width:16,height:16,cursor:"pointer",accentColor:"#58a6ff",flexShrink:0}} />
+                      <div style={{width:3,height:32,borderRadius:2,background:P_COLOR[task.priority]||"#8b949e",flexShrink:0}} />
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:13,fontWeight:500,color:"#f0f6fc",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                          {task.title} <span style={{fontWeight:400,color:"#8b949e",fontSize:11}}>({task.id})</span>
+                        </div>
+                        <div style={{display:"flex",gap:6,marginTop:3,flexWrap:"wrap",alignItems:"center"}}>
+                          {task.category && <span style={{fontSize:11,color:"#58a6ff",background:"rgba(88,166,255,0.1)",padding:"1px 7px",borderRadius:10}}>{task.category.split("/")[0].trim()}</span>}
+                          {task.owner && <span style={{fontSize:11,color:"#8b949e"}}>{task.owner}</span>}
+                          <span style={{fontSize:11,color:over?"#ef4444":"#8b949e"}}>{over?"OVERDUE  ":""}Due {fmtDate(task.due_date,true)}</span>
+                        </div>
+                      </div>
+                      <select value={task.status} onChange={function(e){e.stopPropagation();var s=e.target.value;save({tasks:tasks.map(function(t){return t.id===task.id?Object.assign({},t,{status:s}):t;})});}} onClick={function(e){e.stopPropagation();}} style={{background:"#21262d",border:"1px solid #30363d",color:S_COLOR[task.status]||"#c9d1d9",borderRadius:6,padding:"3px 7px",fontSize:11,cursor:"pointer"}}>
+                        <option value="Not Started">Not Started</option>
+                        <option value="In Progress">In Progress</option>
+                        <option value="Complete">Complete</option>
+                        <option value="Blocked">Blocked</option>
+                      </select>
+                      <button title="Mark Complete" onClick={function(e){e.stopPropagation();save({tasks:tasks.map(function(t){return t.id===task.id?Object.assign({},t,{status:"Complete"}):t;})});}} style={{background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.4)",color:"#22c55e",borderRadius:7,padding:"4px 10px",cursor:"pointer",fontSize:14,fontWeight:700}}>&#10003;</button>
+                      <Btn onClick={function(e){e.stopPropagation();setEditItem({type:"task",item:task});}}>Edit</Btn>
+                      <span style={{color:"#8b949e",fontSize:12,flexShrink:0}}>{expanded?"^":"v"}</span>
+                    </div>
+                    {expanded && (
+                      <div style={{padding:"10px 14px 14px 14px",borderTop:"1px solid #21262d",display:"flex",flexDirection:"column",gap:10}}>
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+                          <div><div style={{fontSize:10,color:"#8b949e",marginBottom:3,fontWeight:600}}>ID</div><span style={{fontSize:12,color:"#8b949e"}}>#{task.id}</span></div>
+                          <div><div style={{fontSize:10,color:"#8b949e",marginBottom:3,fontWeight:600}}>PRIORITY</div><span style={{fontSize:12,color:P_COLOR[task.priority]||"#8b949e",fontWeight:600}}>{task.priority||"-"}</span></div>
+                          <div><div style={{fontSize:10,color:"#8b949e",marginBottom:3,fontWeight:600}}>STATUS</div><span style={{fontSize:12,color:S_COLOR[task.status]||"#c9d1d9"}}>{task.status||"-"}</span></div>
+                          <div><div style={{fontSize:10,color:"#8b949e",marginBottom:3,fontWeight:600}}>LAST UPDATE</div><span style={{fontSize:12,color:"#c9d1d9"}}>{task.last_update||"-"}</span></div>
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                          <div><div style={{fontSize:10,color:"#8b949e",marginBottom:3,fontWeight:600}}>CATEGORY</div><span style={{fontSize:12,color:"#58a6ff"}}>{task.category||"-"}</span></div>
+                          <div><div style={{fontSize:10,color:"#8b949e",marginBottom:3,fontWeight:600}}>OWNER</div><span style={{fontSize:12,color:"#c9d1d9"}}>{task.owner||"-"}</span></div>
+                        </div>
+                        <div><div style={{fontSize:10,color:"#8b949e",marginBottom:4,fontWeight:600}}>NOTES</div><div style={{fontSize:12,color:"#c9d1d9",lineHeight:1.6,background:"#0d1117",padding:"8px 10px",borderRadius:6,whiteSpace:"pre-wrap",minHeight:28}}>{task.notes||"-"}</div></div>
+                        <div><div style={{fontSize:10,color:"#8b949e",marginBottom:4,fontWeight:600}}>NEXT ACTION</div><div style={{fontSize:12,color:"#58a6ff",lineHeight:1.6,background:"rgba(88,166,255,0.05)",padding:"8px 10px",borderRadius:6,whiteSpace:"pre-wrap",minHeight:28}}>{task.next_action||"-"}</div></div>
+                        <div><div style={{fontSize:10,color:"#8b949e",marginBottom:4,fontWeight:600}}>LINK</div>{task.link?<a href={task.link} target="_blank" rel="noreferrer" style={{fontSize:12,color:"#58a6ff"}}>{task.link}</a>:<span style={{fontSize:12,color:"#8b949e"}}>-</span>}</div>
+                      </div>
+                    )}
+                  </div>);
+                      {filtered.length===0 && <Empty msg="No tasks match your filters" />}
+            </div>
+          </div>
+        )}
+
+        {tab==="calendar" && (
+          <div>
+            <SecHead title="Calendar" count={events.length} onAdd={function(){setShowAdd(true);}} addLabel="+ Event" />
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {events.filter(function(e){return (e.start||"")>="2026";}).sort(function(a,b){return (a.start||"").localeCompare(b.start||"");}).slice(0,100).map(function(ev) {
+                var dt=new Date(ev.start);
+                return (
+                  <div key={ev.id} style={{background:"#161b22",borderRadius:8,padding:"10px 14px",display:"flex",gap:12,border:"1px solid #30363d",alignItems:"center"}}>
+                    <div style={{textAlign:"center",minWidth:42,background:"rgba(88,166,255,0.1)",borderRadius:7,padding:"5px 8px",flexShrink:0}}>
+                      <div style={{fontSize:16,fontWeight:700,color:"#58a6ff",lineHeight:1}}>{dt.getDate()}</div>
+                      <div style={{fontSize:10,color:"#8b949e"}}>{dt.toLocaleString("en-US",{month:"short"})}</div>
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:500,color:"#f0f6fc",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ev.title}</div>
+                      <div style={{fontSize:11,color:"#8b949e",marginTop:2}}>{(ev.start||"").slice(11,16)||"All day"}{ev.end?"  "+ev.end.slice(11,16):""}{ev.location?"  "+ev.location:""}</div>
+                    </div>
+                    <button onClick={function(){save({events:events.filter(function(e){return e.id!==ev.id;})});}} style={{background:"none",border:"none",color:"#6e7681",cursor:"pointer",fontSize:14,flexShrink:0}}>X</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab==="members" && (
+          <div>
+            <SecHead title="Team Members" count={members.length} />
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:12}}>
+              {members.map(function(m) {
+                return (
+                  <div key={m.id} style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",cursor:"pointer"}} onClick={function(){setEditItem({type:"member",item:m});}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                      <div><div style={{fontWeight:600,fontSize:14,color:"#f0f6fc"}}>{m.first_name} {m.last_name}</div><div style={{fontSize:12,color:"#58a6ff",marginTop:2}}>{m.email}</div></div>
+                      {m.follow_up && <span style={{fontSize:11,background:"rgba(245,158,11,0.2)",color:"#f59e0b",padding:"2px 8px",borderRadius:20}}>Follow-up: {fmtDate(m.follow_up)}</span>}
+                    </div>
+                    {m.last_email && <div style={{fontSize:12,color:"#8b949e",marginTop:6}}>Last email: {fmtDate(m.last_email)}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab==="bd" && (
+          <div>
+            <SecHead title="BD Opportunities" count={bd.length} />
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {bd.map(function(op) {
+                return (
+                  <div key={op.id} style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"12px 16px",display:"flex",gap:12,alignItems:"flex-start"}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:600,fontSize:13,color:"#f0f6fc"}}>{op.title}</div>
+                      <div style={{display:"flex",gap:8,marginTop:6,flexWrap:"wrap"}}>
+                        {op.customer && <Chip text={op.customer} color="#58a6ff" />}
+                        {op.stage && <Chip text={op.stage} color="#a371f7" />}
+                        {op.contract_size && <Chip text={op.contract_size} color="#f59e0b" />}
+                      </div>
+                      {op.next_step && <div style={{fontSize:12,color:"#8b949e",marginTop:6}}>{(op.next_step||"").slice(0,150)}</div>}
+                    </div>
+                    {op.owner && <div style={{fontSize:11,color:"#8b949e",whiteSpace:"nowrap"}}>{op.owner}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab==="leave" && (
+          <div>
+            <SecHead title="Leave Schedule" count={leave.length} />
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {leave.slice().sort(function(a,b){return (a.start||"").localeCompare(b.start||"");}).map(function(l) {
+                return (
+                  <div key={l.id} style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"12px 16px",display:"flex",gap:12,alignItems:"center"}}>
+                    <div style={{minWidth:80,textAlign:"center",background:"rgba(88,166,255,0.1)",borderRadius:8,padding:"6px 10px"}}>
+                      <div style={{fontSize:11,color:"#58a6ff",fontWeight:600}}>{l.type}</div>
+                      <div style={{fontSize:10,color:"#8b949e",marginTop:2}}>{fmtDate(l.start)}</div>
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:500,fontSize:13,color:"#f0f6fc"}}>{l.member}</div>
+                      <div style={{fontSize:12,color:"#8b949e"}}>to {fmtDate(l.end)}  {l.status}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab==="taxes" && (
+          <div>
+            <SecHead title="Tax Schedule" count={taxes.length} />
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {taxes.slice().sort(function(a,b){return String(a.due_date).localeCompare(String(b.due_date));}).map(function(t) {
+                return (
+                  <div key={t.id} style={{background:"#161b22",border:"1px solid "+(t.paid_date?"#22c55e33":"#ef444433"),borderRadius:10,padding:"12px 16px",display:"flex",gap:16,alignItems:"center"}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:600,fontSize:13,color:"#f0f6fc"}}>{t.tax_type}</div>
+                      <div style={{fontSize:12,color:"#8b949e",marginTop:4}}>Due: {fmtDate(t.due_date)}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontWeight:700,fontSize:15,color:t.paid_date?"#22c55e":"#ef4444"}}>${(parseFloat(t.amount_due)||0).toLocaleString("en-US",{minimumFractionDigits:2})}</div>
+                      <div style={{fontSize:11,color:"#8b949e"}}>{t.paid_date?"Paid "+fmtDate(t.paid_date):"UNPAID"}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab==="travel" && (
+          <div>
+            <SecHead title="Travel and Expenses" count={travel.length} />
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {travel.map(function(t) {
+                return (
+                  <div key={t.id} style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"12px 16px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}>
+                      <div>
+                        <div style={{fontWeight:600,fontSize:13,color:"#f0f6fc"}}>{t.member}  {t.location}</div>
+                        <div style={{fontSize:12,color:"#8b949e",marginTop:3}}>{t.contract}  {fmtDate(t.start)} to {fmtDate(t.end)}</div>
+                      </div>
+                      {t.expense_amount && <div style={{fontWeight:700,fontSize:13,color:"#58a6ff"}}>${parseFloat(t.expense_amount).toLocaleString()}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab==="conferences" && (
+          <div>
+            <SecHead title="Conferences" count={confs.length} />
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {confs.map(function(c) {
+                return (
+                  <div key={c.id} style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"16px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+                      <div>
+                        <div style={{fontWeight:600,fontSize:14,color:"#f0f6fc"}}>{c.name}</div>
+                        <div style={{fontSize:12,color:"#8b949e",marginTop:4}}>{c.location}  {fmtDate(c.start)} to {fmtDate(c.end)}</div>
+                      </div>
+                      <Chip text={c.status||"TBD"} color="#a371f7" />
+                    </div>
+                    {c.notes && <div style={{fontSize:12,color:"#8b949e",marginTop:10,borderTop:"1px solid #21262d",paddingTop:8,lineHeight:1.6}}>{c.notes}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {tab==="ai" && (
+          <div style={{maxWidth:720}}>
+            <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
+              <div style={{fontSize:12,color:"#8b949e",fontWeight:600,marginBottom:12}}>Export / Import Data</div>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                <button onClick={function(){
+                  var json=JSON.stringify(data,null,2);
+                  var encoded=btoa(unescape(encodeURIComponent(json)));
+                  var uri="data:application/json;base64,"+encoded;
+                  var a=document.createElement("a");
+                  a.href=uri;
+                  a.download="icap_backup_"+new Date().toISOString().slice(0,10)+".json";
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  flash("Downloaded!",3000);
+                }} style={{width:"100%",padding:"14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.4)",borderRadius:8,color:"#58a6ff",fontSize:14,fontWeight:600,cursor:"pointer",textAlign:"center"}}>
+                  Download Backup
+                </button>
+                <button onClick={async function(){
+                  flash("Generating sync code...",0);
+                  try {
+                    var r=await fetch("https://api.jsonbin.io/v3/b",{
+                      method:"POST",
+                      headers:{"Content-Type":"application/json","X-Bin-Private":"false"},
+                      body:JSON.stringify(data)
+                    });
+                    var d=await r.json();
+                    var binId=d.metadata&&d.metadata.id;
+                    if (!binId) throw new Error("No bin ID returned");
+                    var code=binId.slice(-6).toUpperCase();
+                    localStorage.setItem("icap_synccode",binId);
+                    setSyncCode(code);
+                    flash("Sync code ready!",0);
+                  } catch(e) { flash("Failed: "+e.message,5000); }
+                }} style={{width:"100%",padding:"14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.4)",borderRadius:8,color:"#58a6ff",fontSize:14,fontWeight:600,cursor:"pointer",textAlign:"center"}}>
+                  Generate Sync Code
+                </button>
+                {syncCode && (
+                  <div style={{background:"#0d1117",border:"2px solid #58a6ff",borderRadius:10,padding:"16px",textAlign:"center"}}>
+                    <div style={{fontSize:11,color:"#8b949e",marginBottom:6}}>Type this code on your other device:</div>
+                    <div style={{fontSize:36,fontWeight:700,color:"#58a6ff",letterSpacing:8,fontFamily:"monospace"}}>{syncCode}</div>
+                    <div style={{fontSize:11,color:"#8b949e",marginTop:6}}>Code expires in 24 hours</div>
+                  </div>
+                )}
+                <button onClick={function(){setShowImport(true);}} style={{width:"100%",padding:"14px",background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,color:"#22c55e",fontSize:14,fontWeight:600,cursor:"pointer",textAlign:"center"}}>
+                  Load with Sync Code
+                </button>
+              </div>
+            </div>
+            <SyncPanel onPush={pushSheet} onPull={pullSheet} />
+            <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
+              <div style={{fontSize:13,fontWeight:700,color:"#f0f6fc",marginBottom:4}}>Smart Paste - Create from Email or Document</div>
+              <div style={{fontSize:12,color:"#8b949e",marginBottom:12}}>Paste any email, form, or text below. AI will extract the details and create the right record automatically.</div>
+              <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+                <label style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.3)",borderRadius:7,color:"#58a6ff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+                  <span>Upload PDF</span>
+                  <input type="file" accept=".pdf,application/pdf" style={{display:"none"}} onChange={function(e){
+                    var file=e.target.files[0];
+                    if (!file) return;
+                    setParseLoading(true);
+                    setParseResult("Reading PDF...");
+                    var reader=new FileReader();
+                    reader.onload=async function(ev){
+                      try {
+                        var base64=ev.target.result.split(",")[1];
+                        var resp=await fetch("https://api.anthropic.com/v1/messages",{
+                          method:"POST",
+                          headers:{"Content-Type":"application/json"},
+                          body:JSON.stringify({
+                            model:"claude-sonnet-4-20250514",
+                            max_tokens:2000,
+                            messages:[{role:"user",content:[
+                              {type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},
+                              {type:"text",text:"Extract all actionable information from this document. Return ONLY a JSON object with no markdown. Today is "+new Date().toISOString().slice(0,10)+". The JSON must have a \"type\" field (task/event/leave/travel/conference/tax) and a \"records\" array. task:{title,due_date(YYYY-MM-DD),priority(High/Medium/Low),notes,next_action,category,owner,status:\"Not Started\"} event:{title,start(YYYY-MM-DD or YYYY-MM-DD HH:MM),end,location,notes} leave:{member,start,end,type(PTO/Sick/Holiday/Other),status:\"Approved\",notes} travel:{member,location,start,end,contract,notes} conference:{name,start,end,location,status,attendee,notes} tax:{tax_type,due_date,amount_due,eft_deadline,paid_date:\"\"}"}
+                            ]}]}
+                          })
+                        });
+                        var d=await resp.json();
+                        var raw=(d.content&&d.content[0]&&d.content[0].text)||"";
+                        raw=raw.replace(/```json|```/g,"").trim();
+                        var parsed=JSON.parse(raw);
+                        var records=parsed.records||[parsed];
+                        var type=parsed.type||"task";
+                        setParsedRecords({type:type,records:records});
+                        var summary=records.length+" "+type+(records.length>1?"s":"")+" found in PDF:\n";
+                        records.forEach(function(r,i){
+                          if (type==="task") summary+="  "+(i+1)+". ["+(r.priority||"Medium")+"] "+(r.title||"Untitled")+" - Due: "+(r.due_date||"TBD")+"\n";
+                          else if (type==="event") summary+="  "+(i+1)+". "+(r.title||"Untitled")+" on "+(r.start||"TBD")+"\n";
+                          else if (type==="leave") summary+="  "+(i+1)+". "+(r.member||"?")+" "+(r.start||"?")+" to "+(r.end||"?")+"\n";
+                          else if (type==="travel") summary+="  "+(i+1)+". "+(r.member||"?")+" to "+(r.location||"?")+" "+(r.start||"?")+"\n";
+                          else if (type==="conference") summary+="  "+(i+1)+". "+(r.name||"Untitled")+" "+(r.start||"?")+"\n";
+                          else if (type==="tax") summary+="  "+(i+1)+". "+(r.tax_type||"Tax")+" due "+(r.due_date||"?")+"\n";
+                        });
+                        setParseResult(summary+"\nReview above and click Add to save.");
+                      } catch(err) {
+                        setParseResult("PDF read failed: "+err.message);
+                        setParsedRecords(null);
+                      }
+                      setParseLoading(false);
+                    };
+                    reader.onerror=function(){ setParseResult("Could not read file."); setParseLoading(false); };
+                    reader.readAsDataURL(file);
+                    e.target.value="";
+                  }} />
+                </label>
+                <label style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.3)",borderRadius:7,color:"#58a6ff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
+                  <span>Upload Email (.eml)</span>
+                  <input type="file" accept=".eml,.msg,.txt,message/rfc822" style={{display:"none"}} onChange={function(e){
+                    var file=e.target.files[0];
+                    if (!file) return;
+                    setParseLoading(true);
+                    setParseResult("Reading email...");
+                    var reader=new FileReader();
+                    reader.onload=function(ev){
+                      var text=ev.target.result;
+                      // Strip email headers for cleaner parsing, keep body
+                      var body=text;
+                      var headerEnd=text.indexOf("\n\n");
+                      if (headerEnd>0) body=text.slice(headerEnd+2);
+                      setParseText(body.slice(0,4000));
+                      setParseResult("Email loaded - click Analyze Text to extract records.");
+                      setParseLoading(false);
+                    };
+                    reader.onerror=function(){ setParseResult("Could not read file."); setParseLoading(false); };
+                    reader.readAsText(file);
+                    e.target.value="";
+                  }} />
+                </label>
+              </div>
+              <textarea value={parseText} onChange={function(e){setParseText(e.target.value);}} placeholder={"Paste email, PDF text, form, or any message here...\n\nExamples:\n- Meeting invite -> Calendar event\n- Leave request email -> Leave record\n- Tax notice -> Tax record or task\n- Conference announcement -> Conference record\n- Travel itinerary -> Travel record\n- Any email with action items -> Tasks"} rows={8} style={{width:"100%",background:"#0d1117",border:"1px solid #30363d",borderRadius:7,padding:"10px 12px",color:"#c9d1d9",fontSize:12,outline:"none",resize:"vertical",boxSizing:"border-box",lineHeight:1.6}} />
+              {parseResult && (
+                <div style={{margin:"10px 0",background:"#0d1117",border:"1px solid #238636",borderRadius:7,padding:"12px",fontSize:12,color:"#c9d1d9",lineHeight:1.7,whiteSpace:"pre-wrap"}}>{parseResult}</div>
+              )}
+              <div style={{display:"flex",gap:8,marginTop:10,flexWrap:"wrap"}}>
+                <button onClick={async function(){
+                  if (!parseText.trim()) return;
+                  setParseLoading(true);
+                  setParseResult("");
+                  var today=new Date().toISOString().slice(0,10);
+                  var systemPrompt="You are a data extraction assistant for a business management app. Extract structured data from the provided text and return ONLY a JSON object with no markdown, no explanation, no backticks.\n\nToday is "+today+".\n\nThe JSON must have a \"type\" field (one of: task, event, leave, travel, conference, tax) and a \"records\" array.\nEach record should match these schemas:\n\ntask: {title, due_date (YYYY-MM-DD), priority (High/Medium/Low), notes, next_action, category, owner, status:\"Not Started\"}\nevent: {title, start (YYYY-MM-DD or YYYY-MM-DD HH:MM), end, location, notes}\nleave: {member, start (YYYY-MM-DD), end (YYYY-MM-DD), type (PTO/Sick/Holiday/Other), status:\"Approved\", notes}\ntravel: {member, location, start (YYYY-MM-DD), end (YYYY-MM-DD), contract, notes}\nconference: {name, start (YYYY-MM-DD), end (YYYY-MM-DD), location, status, attendee, notes}\ntax: {tax_type, due_date (YYYY-MM-DD), amount_due, eft_deadline, paid_date:\"\"}\n\nIf the text contains multiple types, return the most prominent one. If unclear, default to task.\nAlways return multiple records if multiple items are mentioned.\nReturn ONLY valid JSON.";
+                  try {
+                    var resp=await fetch("https://api.anthropic.com/v1/messages",{
+                      method:"POST",
+                      headers:{"Content-Type":"application/json"},
+                      body:JSON.stringify({
+                        model:"claude-sonnet-4-20250514",
+                        max_tokens:1000,
+                        system:systemPrompt,
+                        messages:[{role:"user",content:parseText.trim()}]
+                      })
+                    });
+                    var d=await resp.json();
+                    var raw=d.content&&d.content[0]&&d.content[0].text||"";
+                    raw=raw.replace(/```json|```/g,"").trim();
+                    var parsed=JSON.parse(raw);
+                    var records=parsed.records||[parsed];
+                    var type=parsed.type||"task";
+                    setParsedRecords({type:type,records:records});
+                    var summary=records.length+" "+type+(records.length>1?"s":"")+" found:\n";
+                    records.forEach(function(r,i){
+                      if (type==="task") summary+="  "+(i+1)+". ["+(r.priority||"Medium")+"] "+(r.title||"Untitled")+" - Due: "+(r.due_date||"TBD")+"\n";
+                      else if (type==="event") summary+="  "+(i+1)+". "+(r.title||"Untitled")+" on "+(r.start||"TBD")+"\n";
+                      else if (type==="leave") summary+="  "+(i+1)+". "+(r.member||"?")+" - "+(r.start||"?")+" to "+(r.end||"?")+" ("+(r.type||"Leave")+")\n";
+                      else if (type==="travel") summary+="  "+(i+1)+". "+(r.member||"?")+" to "+(r.location||"?")+" "+(r.start||"?")+" to "+(r.end||"?")+"\n";
+                      else if (type==="conference") summary+="  "+(i+1)+". "+(r.name||"Untitled")+" at "+(r.location||"?")+" "+(r.start||"?")+"\n";
+                      else if (type==="tax") summary+="  "+(i+1)+". "+(r.tax_type||"Tax")+" due "+(r.due_date||"?")+" amt: "+(r.amount_due||"?")+"\n";
+                    });
+                    setParseResult(summary+"\nReview above and click Add to save.");
+                  } catch(e) {
+                    setParseResult("Error: "+e.message);
+                    setParsedRecords(null);
+                  }
+                  setParseLoading(false);
+                }} disabled={!parseText.trim()||parseLoading} style={{padding:"8px 18px",borderRadius:7,border:"1px solid rgba(88,166,255,0.4)",background:parseText.trim()&&!parseLoading?"rgba(88,166,255,0.15)":"#21262d",color:parseText.trim()&&!parseLoading?"#58a6ff":"#8b949e",fontSize:13,fontWeight:600,cursor:parseText.trim()&&!parseLoading?"pointer":"default"}}>
+                  {parseLoading?"Analyzing...":"Analyze Text"}
+                </button>
+                {parsedRecords && (
+                  <button onClick={function(){
+                    var type=parsedRecords.type;
+                    var records=parsedRecords.records;
+                    var newData=Object.assign({},data);
+                    var maxId=function(arr){return arr&&arr.length?Math.max.apply(null,arr.map(function(x){return x.id||0;})):0;};
+                    records.forEach(function(r,i){
+                      var id=maxId(newData[type==="task"?"tasks":type==="event"?"events":type==="leave"?"leave":type==="travel"?"travel":type==="conference"?"conferences":"taxes"])+i+1;
+                      var rec=Object.assign({id:id},r);
+                      if (type==="task") newData.tasks=(newData.tasks||[]).concat([rec]);
+                      else if (type==="event") newData.events=(newData.events||[]).concat([rec]);
+                      else if (type==="leave") newData.leave=(newData.leave||[]).concat([rec]);
+                      else if (type==="travel") newData.travel=(newData.travel||[]).concat([rec]);
+                      else if (type==="conference") newData.conferences=(newData.conferences||[]).concat([rec]);
+                      else if (type==="tax") newData.taxes=(newData.taxes||[]).concat([rec]);
+                    });
+                    save(newData);
+                    setParseResult("Added "+records.length+" "+type+(records.length>1?"s":"")+" successfully!");
+                    setParsedRecords(null);
+                    setParseText("");
+                    setTimeout(function(){setParseResult("");},4000);
+                  }} style={{padding:"8px 18px",borderRadius:7,border:"1px solid #2ea043",background:"#238636",color:"#fff",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                    Add {parsedRecords.records.length} {parsedRecords.type}{parsedRecords.records.length>1?"s":""}
+                  </button>
+                )}
+                {(parseText||parseResult) && (
+                  <button onClick={function(){setParseText("");setParseResult("");setParsedRecords(null);}} style={{padding:"8px 14px",borderRadius:7,border:"1px solid #30363d",background:"#21262d",color:"#8b949e",fontSize:13,cursor:"pointer"}}>
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+            <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
+              <div style={{fontSize:12,color:"#8b949e",fontWeight:600,marginBottom:10}}>Example commands</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {["What are my high priority open tasks?","What tasks are overdue?","Add task: Call Stacey Shea high priority BD due Friday","What taxes are unpaid?","Show me open House Build tasks"].map(function(s){
+                  return <button key={s} onClick={function(){setAiInput(s);}} style={{padding:"4px 10px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.25)",borderRadius:20,color:"#58a6ff",fontSize:11,cursor:"pointer"}}>{s}</button>;
+                })}
+              </div>
+            </div>
+            <Btn onClick={runGmail} disabled={gmailLoading} style={{width:"100%",padding:"10px",background:"#161b22",border:"1px solid #30363d",color:gmailLoading?"#8b949e":"#c9d1d9",marginBottom:14,display:"block"}}>
+              {gmailLoading?"Scanning Gmail...":"Pull New Tasks from Gmail"}
+            </Btn>
+            <div style={{minHeight:200,maxHeight:400,overflowY:"auto",marginBottom:12,display:"flex",flexDirection:"column",gap:8}}>
+              {aiHistory.length===0 && <Empty msg="Ask me anything about your IC-CAP data." />}
+              {aiHistory.map(function(m,i){
+                return (
+                  <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+                    <div style={{maxWidth:"82%",padding:"9px 13px",borderRadius:10,background:m.role==="user"?"#1f6feb":"#21262d",border:m.role==="assistant"?"1px solid #30363d":"none",fontSize:13,lineHeight:1.6,whiteSpace:"pre-wrap",color:m.role==="user"?"#f0f6fc":"#c9d1d9"}}>{m.text}</div>
+                  </div>
+                );
+              })}
+              {aiLoading && <div style={{display:"flex"}}><div style={{padding:"9px 13px",borderRadius:10,background:"#21262d",border:"1px solid #30363d",fontSize:13,color:"#8b949e"}}>Thinking...</div></div>}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <input value={aiInput} onChange={function(e){setAiInput(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter"&&!e.shiftKey)runAI();}} placeholder="Ask about your data..." style={{flex:1,background:"#21262d",border:"1px solid #30363d",borderRadius:8,padding:"9px 13px",color:"#c9d1d9",fontSize:13,outline:"none"}} />
+              <Btn onClick={runAI} disabled={aiLoading||!aiInput.trim()} style={{background:"#238636",border:"1px solid #2ea043",color:"#f0f6fc",fontWeight:600,opacity:(aiLoading||!aiInput.trim())?0.5:1}}>Send</Btn>
+            </div>
         )}
 
       </div>
