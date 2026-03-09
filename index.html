@@ -616,22 +616,24 @@ function App() {
     if (!c.sheetId) { alert("No Sheet ID configured. Click Setup."); return; }
     if (!c.clientId) { alert("No Client ID configured. Click Setup."); return; }
     setSyncing(true);
-    flash("Pushing all data to Sheet...",0);
-    try {
+    var doPush=async function() {
+      // Always force a fresh token before pushing
+      localStorage.removeItem("icap_gtoken");
+      localStorage.removeItem("icap_gtoken_exp");
+      flash("Signing in to Google...",0);
       var ok=await ensureAuth();
       if (!ok) throw new Error("Google sign-in failed or was cancelled");
       flash("Ensuring sheet tabs exist...",0);
       await ensureTabs(c.sheetId);
       flash("Writing data...",0);
       await writeAll(c.sheetId,data);
+    };
+    try {
+      await doPush();
       var counts="Tasks:"+((data.tasks||[]).length)+" Members:"+((data.members||[]).length)+" BD:"+((data.bd_opportunities||[]).length);
       flash("Done! "+counts,5000);
     } catch(e) {
-      if (e.message&&e.message.indexOf("Token expired")>=0) {
-        flash("Session expired. Go to Setup > Connect Google, then try Force Push again.",8000);
-      } else {
-        flash("Push failed: "+e.message,8000);
-      }
+      flash("Push failed: "+e.message,8000);
     }
     setSyncing(false);
   };
