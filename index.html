@@ -972,8 +972,6 @@ function App() {
             <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:10,marginBottom:20}}>
               {[{l:"Total",v:stats.total,c:"#58a6ff"},{l:"Open",v:stats.open,c:"#8b949e"},{l:"In Progress",v:stats.inprog,c:"#3b82f6"},{l:"Complete",v:stats.done,c:"#22c55e"},{l:"Overdue",v:stats.overdue,c:"#ef4444"},{l:"High Pri",v:stats.high,c:"#f97316"}].map(function(s){
                 return <div key={s.l} style={{background:"#161b22",border:"1px solid "+s.c+"33",borderRadius:10,padding:"12px 14px"}}><div style={{fontSize:22,fontWeight:700,color:s.c}}>{s.v}</div><div style={{fontSize:11,color:"#8b949e",marginTop:2}}>{s.l}</div></div>;
-              })}
-            </div>
             <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
               <input value={filter.search} onChange={function(e){setFilter(function(f){return Object.assign({},f,{search:e.target.value});});}} placeholder="Search..." style={{background:"#21262d",border:"1px solid #30363d",borderRadius:8,padding:"6px 12px",color:"#c9d1d9",fontSize:13,width:180,outline:"none"}} />
               <select value={filter.status} onChange={function(e){setFilter(function(f){return Object.assign({},f,{status:e.target.value});});}} style={{background:"#21262d",border:"1px solid #30363d",color:"#c9d1d9",borderRadius:8,padding:"6px 10px",fontSize:13}}>
@@ -1034,12 +1032,40 @@ function App() {
                 </div>
               )}
             </div>
-            <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {filtered.slice(0,200).map(function(task) {
-                var over=isOverdue(task);
-                var expanded=expandedTask===task.id;
-                return (
-                  <div key={task.id} style={{background:"#161b22",borderRadius:8,border:"1px solid "+(over?"#ef444433":expanded?"#58a6ff55":"#30363d"),overflow:"hidden"}}>
+            <div style={{display:"flex",flexDirection:"column",gap:0}}>
+              {(function(){
+                var today=new Date().toISOString().slice(0,10);
+                var tom=new Date(); tom.setDate(tom.getDate()+1);
+                var tomStr=tom.toISOString().slice(0,10);
+                function getLabel(task){
+                  var d=task.due_date?task.due_date.slice(0,10):"";
+                  if (!d) return "No Due Date";
+                  if (d<today) return "Overdue";
+                  if (d===today) return "Today";
+                  if (d===tomStr) return "Tomorrow";
+                  return new Date(d+"T00:00:00").toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric",year:"numeric"});
+                }
+                function labelRank(l){ return l==="Overdue"?0:l==="Today"?1:l==="Tomorrow"?2:l==="No Due Date"?999:3; }
+                var groups={}; var groupOrder=[];
+                filtered.slice(0,200).forEach(function(task){
+                  var label=getLabel(task);
+                  if (!groups[label]){groups[label]=[];groupOrder.push(label);}
+                  groups[label].push(task);
+                });
+                groupOrder.sort(function(a,b){
+                  var ra=labelRank(a), rb=labelRank(b);
+                  if(ra!==rb) return ra-rb;
+                  return a>b?1:-1;
+                });
+                var rows=[];
+                groupOrder.forEach(function(label,gi){
+                  var isOverdueGrp=label==="Overdue";
+                  var isTodayGrp=label==="Today";
+                  rows.push(<div key={"hdr-"+label} style={{padding:"8px 4px 4px",fontSize:11,fontWeight:700,color:isOverdueGrp?"#ef4444":isTodayGrp?"#22c55e":"#8b949e",textTransform:"uppercase",letterSpacing:1,borderBottom:"1px solid #21262d",marginBottom:6,marginTop:gi>0?14:0}}>{label} ({groups[label].length})</div>);
+                  groups[label].forEach(function(task){
+                    var over=isOverdueGrp;
+                    var expanded=expandedTask===task.id;
+                    rows.push(<div key={task.id} style={{background:"#161b22",borderRadius:8,border:"1px solid "+(over?"#ef444433":expanded?"#58a6ff55":"#30363d"),overflow:"hidden",marginBottom:6}}>
                     <div style={{padding:"10px 14px",display:"flex",alignItems:"center",gap:10,cursor:"pointer"}} onClick={function(){setExpandedTask(expanded?null:task.id);}}>
                       <input type="checkbox" checked={!!selectedTasks[task.id]} onChange={function(e){e.stopPropagation();setSelectedTasks(function(prev){var n=Object.assign({},prev);n[task.id]=e.target.checked;return n;});}} onClick={function(e){e.stopPropagation();}} style={{width:16,height:16,cursor:"pointer",accentColor:"#58a6ff",flexShrink:0}} />
                       <div style={{width:3,height:32,borderRadius:2,background:P_COLOR[task.priority]||"#8b949e",flexShrink:0}} />
@@ -1080,9 +1106,11 @@ function App() {
                         <div><div style={{fontSize:10,color:"#8b949e",marginBottom:4,fontWeight:600}}>LINK</div>{task.link?<a href={task.link} target="_blank" rel="noreferrer" style={{fontSize:12,color:"#58a6ff"}}>{task.link}</a>:<span style={{fontSize:12,color:"#8b949e"}}>-</span>}</div>
                       </div>
                     )}
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
               {filtered.length===0 && <Empty msg="No tasks match your filters" />}
             </div>
           </div>
@@ -1105,9 +1133,11 @@ function App() {
                       <div style={{fontSize:11,color:"#8b949e",marginTop:2}}>{(ev.start||"").slice(11,16)||"All day"}{ev.end?"  "+ev.end.slice(11,16):""}{ev.location?"  "+ev.location:""}</div>
                     </div>
                     <button onClick={function(){save({events:events.filter(function(e){return e.id!==ev.id;})});}} style={{background:"none",border:"none",color:"#6e7681",cursor:"pointer",fontSize:14,flexShrink:0}}>X</button>
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
             </div>
           </div>
         )}
@@ -1124,9 +1154,11 @@ function App() {
                       {m.follow_up && <span style={{fontSize:11,background:"rgba(245,158,11,0.2)",color:"#f59e0b",padding:"2px 8px",borderRadius:20}}>Follow-up: {fmtDate(m.follow_up)}</span>}
                     </div>
                     {m.last_email && <div style={{fontSize:12,color:"#8b949e",marginTop:6}}>Last email: {fmtDate(m.last_email)}</div>}
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
             </div>
           </div>
         )}
@@ -1148,9 +1180,11 @@ function App() {
                       {op.next_step && <div style={{fontSize:12,color:"#8b949e",marginTop:6}}>{(op.next_step||"").slice(0,150)}</div>}
                     </div>
                     {op.owner && <div style={{fontSize:11,color:"#8b949e",whiteSpace:"nowrap"}}>{op.owner}</div>}
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
             </div>
           </div>
         )}
@@ -1170,9 +1204,11 @@ function App() {
                       <div style={{fontWeight:500,fontSize:13,color:"#f0f6fc"}}>{l.member}</div>
                       <div style={{fontSize:12,color:"#8b949e"}}>to {fmtDate(l.end)}  {l.status}</div>
                     </div>
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
             </div>
           </div>
         )}
@@ -1192,9 +1228,11 @@ function App() {
                       <div style={{fontWeight:700,fontSize:15,color:t.paid_date?"#22c55e":"#ef4444"}}>${(parseFloat(t.amount_due)||0).toLocaleString("en-US",{minimumFractionDigits:2})}</div>
                       <div style={{fontSize:11,color:"#8b949e"}}>{t.paid_date?"Paid "+fmtDate(t.paid_date):"UNPAID"}</div>
                     </div>
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
             </div>
           </div>
         )}
@@ -1213,9 +1251,11 @@ function App() {
                       </div>
                       {t.expense_amount && <div style={{fontWeight:700,fontSize:13,color:"#58a6ff"}}>${parseFloat(t.expense_amount).toLocaleString()}</div>}
                     </div>
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
             </div>
           </div>
         )}
@@ -1235,9 +1275,11 @@ function App() {
                       <Chip text={c.status||"TBD"} color="#a371f7" />
                     </div>
                     {c.notes && <div style={{fontSize:12,color:"#8b949e",marginTop:10,borderTop:"1px solid #21262d",paddingTop:8,lineHeight:1.6}}>{c.notes}</div>}
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
             </div>
           </div>
         )}
@@ -1394,9 +1436,11 @@ function App() {
                 return (
                   <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
                     <div style={{maxWidth:"82%",padding:"9px 13px",borderRadius:10,background:m.role==="user"?"#1f6feb":"#21262d",border:m.role==="assistant"?"1px solid #30363d":"none",fontSize:13,lineHeight:1.6,whiteSpace:"pre-wrap",color:m.role==="user"?"#f0f6fc":"#c9d1d9"}}>{m.text}</div>
-                  </div>
-                );
-              })}
+                  </div>);
+                  });
+                });
+                return rows;
+              })()}
               {aiLoading && <div style={{display:"flex"}}><div style={{padding:"9px 13px",borderRadius:10,background:"#21262d",border:"1px solid #30363d",fontSize:13,color:"#8b949e"}}>Thinking...</div></div>}
             </div>
             <div style={{display:"flex",gap:8}}>
