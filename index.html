@@ -107,13 +107,14 @@ async function apiGet(sheetId, range) {
   var apikey=localStorage.getItem("icap_apikey");
   var url="https://sheets.googleapis.com/v4/spreadsheets/"+sheetId+"/values/"+encodeURIComponent(range);
   var r;
-  if (token && tokenValid()) {
+  if (token) {
     r=await fetch(url,{headers:{Authorization:"Bearer "+token}});
   } else if (apikey) {
     r=await fetch(url+"?key="+apikey);
   } else {
-    throw new Error("Not authenticated");
+    throw new Error("Not authenticated - please sign in via Setup");
   }
+  if (r.status===401) { localStorage.removeItem("icap_gtoken"); localStorage.removeItem("icap_gtoken_exp"); throw new Error("Session expired - please try again"); }
   if (!r.ok) throw new Error("Read failed: "+r.status);
   return r.json();
 }
@@ -177,8 +178,8 @@ async function readAll(sheetId) {
   var out={};
   for (var i=0;i<pairs.length;i++) {
     var key=pairs[i][0], tab=pairs[i][1], cols=pairs[i][2];
-    try { var res=await apiGet(sheetId,tab+"!A:Z"); out[key]=fromRows(res.values,cols); }
-    catch(e) { out[key]=[]; }
+    try { var res=await apiGet(sheetId,tab+"!A:Z"); out[key]=fromRows(res.values||[],cols); }
+    catch(e) { out[key]=[]; console.warn("Could not read tab "+tab+": "+e.message); }
   }
   return out;
 }
@@ -605,7 +606,7 @@ function App() {
     if (!c.sheetId) { flash("No Sheet configured - data is local only",3000); return; }
     setSyncing(true); flash("Refreshing from Sheet...",0);
     try {
-      var ok=await ensureAuth();
+      var ok=await ensureAuth(true);
       if (!ok) throw new Error("Not signed in to Google");
       var sd=await readAll(c.sheetId);
       // Only update if sheet actually has data - never overwrite with empty
