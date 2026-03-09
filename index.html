@@ -1,3 +1,6 @@
+---
+layout: null
+---
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1626,6 +1629,7 @@ function App() {
               <input value={aiInput} onChange={function(e){setAiInput(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter"&&!e.shiftKey)runAI();}} placeholder="Ask about your data..." style={{flex:1,background:"#21262d",border:"1px solid #30363d",borderRadius:8,padding:"9px 13px",color:"#c9d1d9",fontSize:13,outline:"none"}} />
               <Btn onClick={runAI} disabled={aiLoading||!aiInput.trim()} style={{background:"#238636",border:"1px solid #2ea043",color:"#f0f6fc",fontWeight:600,opacity:(aiLoading||!aiInput.trim())?0.5:1}}>Send</Btn>
             </div>
+          </div>
         )}
 
       </div>
@@ -1948,111 +1952,6 @@ var today=new Date().toISOString().slice(0,10);
           </div>
         )}
 
-        {tab==="ai" && (
-          <div style={{maxWidth:720}}>
-            <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
-              <div style={{fontSize:12,color:"#8b949e",fontWeight:600,marginBottom:12}}>Export / Import Data</div>
-              <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                <button onClick={function(){
-                  var json=JSON.stringify(data,null,2);
-                  var encoded=btoa(unescape(encodeURIComponent(json)));
-                  var uri="data:application/json;base64,"+encoded;
-                  var a=document.createElement("a");
-                  a.href=uri;
-                  a.download="icap_backup_"+new Date().toISOString().slice(0,10)+".json";
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                  flash("Downloaded!",3000);
-                }} style={{width:"100%",padding:"14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.4)",borderRadius:8,color:"#58a6ff",fontSize:14,fontWeight:600,cursor:"pointer",textAlign:"center"}}>
-                  Download Backup
-                </button>
-                <button onClick={async function(){
-                  flash("Generating sync code...",0);
-                  try {
-                    var r=await fetch("https://api.jsonbin.io/v3/b",{
-                      method:"POST",
-                      headers:{"Content-Type":"application/json","X-Bin-Private":"false"},
-                      body:JSON.stringify(data)
-                    });
-                    var d=await r.json();
-                    var binId=d.metadata&&d.metadata.id;
-                    if (!binId) throw new Error("No bin ID returned");
-                    var code=binId.slice(-6).toUpperCase();
-                    localStorage.setItem("icap_synccode",binId);
-                    setSyncCode(code);
-                    flash("Sync code ready!",0);
-                  } catch(e) { flash("Failed: "+e.message,5000); }
-                }} style={{width:"100%",padding:"14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.4)",borderRadius:8,color:"#58a6ff",fontSize:14,fontWeight:600,cursor:"pointer",textAlign:"center"}}>
-                  Generate Sync Code
-                </button>
-                {syncCode && (
-                  <div style={{background:"#0d1117",border:"2px solid #58a6ff",borderRadius:10,padding:"16px",textAlign:"center"}}>
-                    <div style={{fontSize:11,color:"#8b949e",marginBottom:6}}>Type this code on your other device:</div>
-                    <div style={{fontSize:36,fontWeight:700,color:"#58a6ff",letterSpacing:8,fontFamily:"monospace"}}>{syncCode}</div>
-                    <div style={{fontSize:11,color:"#8b949e",marginTop:6}}>Code expires in 24 hours</div>
-                  </div>
-                )}
-                <button onClick={function(){setShowImport(true);}} style={{width:"100%",padding:"14px",background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,color:"#22c55e",fontSize:14,fontWeight:600,cursor:"pointer",textAlign:"center"}}>
-                  Load with Sync Code
-                </button>
-              </div>
-            </div>
-            <SyncPanel onPush={pushSheet} onPull={pullSheet} />
-            <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
-              <div style={{fontSize:13,fontWeight:700,color:"#f0f6fc",marginBottom:4}}>Smart Paste - Create from Email or Document</div>
-              <div style={{fontSize:12,color:"#8b949e",marginBottom:12}}>Paste any email, form, or text below. AI will extract the details and create the right record automatically.</div>
-              <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
-                <label style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.3)",borderRadius:7,color:"#58a6ff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
-                  <span>Upload PDF</span>
-                  <input type="file" accept=".pdf,application/pdf" style={{display:"none"}} onChange={function(e){
-                    var file=e.target.files[0];
-                    if (!file) return;
-                    setParseLoading(true);
-                    setParseResult("Reading PDF...");
-                    var reader=new FileReader();
-                    reader.onload=async function(ev){
-                      try {
-                        var base64=ev.target.result.split(",")[1];
-                        var resp=await fetch("https://api.anthropic.com/v1/messages",{
-                          method:"POST",
-                          headers:{"Content-Type":"application/json"},
-                          body:JSON.stringify({
-                            model:"claude-sonnet-4-20250514",
-                            max_tokens:2000,
-                            messages:[{role:"user",content:[
-                              {type:"document",source:{type:"base64",media_type:"application/pdf",data:base64}},
-                              {type:"text",text:"Extract all actionable information from this document. Return ONLY a JSON object with no markdown. Today is "+new Date().toISOString().slice(0,10)+". The JSON must have a \"type\" field (task/event/leave/travel/conference/tax) and a \"records\" array. task:{title,due_date(YYYY-MM-DD),priority(High/Medium/Low),notes,next_action,category,owner,status:\"Not Started\"} event:{title,start(YYYY-MM-DD or YYYY-MM-DD HH:MM),end,location,notes} leave:{member,start,end,type(PTO/Sick/Holiday/Other),status:\"Approved\",notes} travel:{member,location,start,end,contract,notes} conference:{name,start,end,location,status,attendee,notes} tax:{tax_type,due_date,amount_due,eft_deadline,paid_date:\"\"}"}
-                            ]}]}
-                          })
-                        });
-                        var d=await resp.json();
-                        var raw=(d.content&&d.content[0]&&d.content[0].text)||"";
-                        raw=raw.replace(/```json|```/g,"").trim();
-                        var parsed=JSON.parse(raw);
-                        var records=parsed.records||[parsed];
-                        var type=parsed.type||"task";
-                        setParsedRecords({type:type,records:records});
-                        var summary=records.length+" "+type+(records.length>1?"s":"")+" found in PDF:\n";
-                        records.forEach(function(r,i){
-                          if (type==="task") summary+="  "+(i+1)+". ["+(r.priority||"Medium")+"] "+(r.title||"Untitled")+" - Due: "+(r.due_date||"TBD")+"\n";
-                          else if (type==="event") summary+="  "+(i+1)+". "+(r.title||"Untitled")+" on "+(r.start||"TBD")+"\n";
-                          else if (type==="leave") summary+="  "+(i+1)+". "+(r.member||"?")+" "+(r.start||"?")+" to "+(r.end||"?")+"\n";
-                          else if (type==="travel") summary+="  "+(i+1)+". "+(r.member||"?")+" to "+(r.location||"?")+" "+(r.start||"?")+"\n";
-                          else if (type==="conference") summary+="  "+(i+1)+". "+(r.name||"Untitled")+" "+(r.start||"?")+"\n";
-                          else if (type==="tax") summary+="  "+(i+1)+". "+(r.tax_type||"Tax")+" due "+(r.due_date||"?")+"\n";
-                        });
-                        setParseResult(summary+"\nReview above and click Add to save.");
-                      } catch(err) {
-                        setParseResult("PDF read failed: "+err.message);
-                        setParsedRecords(null);
-                      }
-                      setParseLoading(false);
-                    };
-                    reader.onerror=function(){ setParseResult("Could not read file."); setParseLoading(false); };
-                    reader.readAsDataURL(file);
-                    e.target.value="";
-                  }} />
                 </label>
                 <label style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",background:"rgba(88,166,255,0.1)",border:"1px solid rgba(88,166,255,0.3)",borderRadius:7,color:"#58a6ff",fontSize:12,fontWeight:600,cursor:"pointer"}}>
                   <span>Upload Email (.eml)</span>
